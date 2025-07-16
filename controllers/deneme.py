@@ -35,3 +35,9 @@ class XBeePackage:
 class XBeeModule:
     def __init__(self,):
         pass
+
+
+
+if __name__ == '__main__':
+    input_user = str(input('port gir'))
+    print(f'port: {input_user}')

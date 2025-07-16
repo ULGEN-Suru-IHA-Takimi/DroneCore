@@ -1,1 +1,7 @@
 .venv/*
+connect/__pycache__/*
+controllers/__pycache__/*
+ground_control/__pycache__/*
+interface/__pycache__/*
+missions/__pycache__/*
+test/__pycache__/*
