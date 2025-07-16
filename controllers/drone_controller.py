@@ -7,7 +7,7 @@ import sys
 from typing import List, Dict, Any, TypedDict, Tuple
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from connect.drone_connection import DroneConnection
-from status_controller import StatusController
+from xbee_controller import *
 # Waypoint tuple formatı: (lat, lon, alt, heading)
 WaypointTuple = Tuple[float, float, float, float]
 
@@ -22,7 +22,9 @@ class DroneController(DroneConnection):
         super().__init__(sys_address=sys_address)
         self.waypoints: List[WaypointTuple] = []
         self.flying_alt: float = 0.0
-        self.xbee_controller = StatusController(port=xbee_port, baud_rate=xbee_baud_rate)
+        self.xbee_module = XBeeModule(port=xbee_port, baudrate=xbee_baud_rate)
+        
+        self.BROADCAST_64BIT_ADDR = "000000000000FFFF"  # XBee broadcast address
 
     def set_waypoints(self, waypoints: List[WaypointTuple] = [
         (47.397606, 8.543060, 20.0, 0),    # Waypoint 1  
@@ -68,6 +70,7 @@ class DroneController(DroneConnection):
         await asyncio.sleep(2)  # Extra time to stabilize
 
     async def waypoint_mission(self) -> None:
+        self.xbee_module.connect()
         """Execute waypoint mission"""
         # Update waypoint altitudes to use calculated flying altitude
         updated_waypoints = []
@@ -89,21 +92,17 @@ class DroneController(DroneConnection):
             while not target_reached:
                 async for position in self.drone.telemetry.position():
                     # Calculate distance to target (simple approximation)
-                    self.status_controler.set_gps_callback(
-                        position.latitude_deg,
-                        position.longitude_deg,
-                        position.relative_altitude_m,
-                        yaw,
-                        int(position.timestamp)
-                    )
                     
-                    self.xbee_controller.send_gps_data({
-                        'latitude': position.latitude_deg,
-                        'longitude': position.longitude_deg,
-                        'altitude': position.relative_altitude_m,
-                        'heading': yaw,
-                        'timestamp': int(position.timestamp)
-                    })
+                    gps_package = XBeePackage(
+                        package_type="G",
+                        sender="1",
+                        params={
+                            "x": int(lat * 10000),
+                            "y": int(lon * 10000),
+                            "z": int(alt * 10)
+                        }
+                    )
+                    self.xbee_module.send_package(gps_package, remote_xbee_addr_hex= self.BROADCAST_64BIT_ADDR)
                     lat_diff = abs(position.latitude_deg - lat)
                     lon_diff = abs(position.longitude_deg - lon)
                     
