@@ -8,8 +8,6 @@ class DroneConnection:
         self.sys_address = sys_address
         self.drone = System()
     
-
-
     async def connect(self):
         await self.drone.connect(system_address=self.sys_address)
 
