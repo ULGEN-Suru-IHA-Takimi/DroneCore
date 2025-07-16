@@ -1,374 +1,329 @@
 #!/usr/bin/env python3
 
 import serial
+from digi.xbee.devices import XBeeDevice, RemoteXBeeDevice, XBee64BitAddress
+from digi.xbee.exception import XBeeException, TimeoutException
 import time
 import threading
 import json
-from typing import Dict, Any, Optional, Callable
-from dataclasses import dataclass
+from collections import deque
 
+# --- Global Yapılandırma ve Kuyruklar için Sabitler ---
+# Bu sabitler, programın genel ayarlarını belirler ve her yerden erişilebilir olmalıdır.
+# Kendi XBee'nizin gerçek baud rate'ini buraya yazmalısınız. Genellikle XBee'ler 9600 baud ile başlar.
+DEFAULT_BAUD_RATE = 57600 # Bu değeri XBee'nizin gerçek baud rate'ine göre ayarlayın!
 
-@dataclass
-class XBeeMessage:
-    """Data class for XBee messages."""
-    sender: str
-    receiver: str
-    message_type: str
-    payload: Dict[str, Any]
-    timestamp: float
+# Veri gönderme ve kuyruk yönetimi için ayarlar
+SEND_INTERVAL = 1  # Saniyede 10 kez gönderim (1/0.1). Daha yavaş olması gerekiyorsa artırın.
+QUEUE_RETENTION = 10 # Saniye, kuyrukta tutulma süresi.
 
-
-class XBeeModule:
-    """
-    A class to handle XBee communication for drone systems.
-    Provides methods for sending/receiving data and managing connections.
-    """
-    
-    def __init__(self, port: str = "/dev/tty19", baudrate: int = 57600, timeout: float = 1.0):
-        """
-        Initialize the XBee module.
+# --- XBeePackage Sınıfı ---
+class XBeePackage:
+    '''
+    XBee üzerinden gönderilecek/alınacak paket tanımlaması
+    '''
+    def __init__(self, package_type: str, # t paket tipi
+                 sender: str,             # s gönderen
+                 params: dict = None):    # p parametreler
         
-        Args:
-            port: Serial port for XBee module
-            baudrate: Communication speed (default 57600)
-            timeout: Serial timeout in seconds
+        self.package_type = package_type
+        self.sender = sender
+        self.params = params if params is not None else {}
+
+    def to_json(self):
+        """
+        Paketi JSON formatında bir Python sözlüğüne dönüştürür.
+        """
+        data = {
+            "t": self.package_type,
+            "s": self.sender,
+        }
+        if self.params:
+            data["p"] = self.params
+        return data
+
+    def __bytes__(self):
+        """
+        Paketi JSON string'ine ve ardından UTF-8 bayt dizisine dönüştürür.
+        """
+        json_data = json.dumps(self.to_json())
+        encoded_data = json_data.encode('utf-8')
+        if len(encoded_data) > 70: # Bu değer XBee modelinize göre değişebilir (genelde 72-100 byte)
+            print(f"Uyarı: Gönderilen paket boyutu ({len(encoded_data)} bayt) XBee limitini aşabilir. Veri kaybı yaşanabilir.")
+        return encoded_data
+    
+    @classmethod
+    def from_bytes(cls, byte_data):
+        """
+        Bayt dizisinden XBeePackage nesnesi oluşturur.
+        """
+        decoded_data = byte_data.decode('utf-8')
+        json_data = json.loads(decoded_data)
+        
+        package_type = json_data.get("t")
+        sender = json_data.get("s")
+        params = json_data.get("p", {})
+        
+        return cls(package_type, sender, params)
+
+# --- XBeeModule Sınıfı ---
+class XBeeModule:
+    def __init__(self, port: str, baudrate: int): # Port ve baudrate doğrudan alınmalı
+        """
+        XBee modülünü başlatır ve seri port ayarlarını yapar.
+        :param port: XBee modülünün bağlı olduğu seri port.
+        :param baudrate: Seri portun baud hızı.
         """
         self.port = port
         self.baudrate = baudrate
-        self.timeout = timeout
-        self.serial_connection: Optional[serial.Serial] = None
-        self.is_connected = False
-        self.is_listening = False
-        
-        # Message handling
-        self.message_callbacks: Dict[str, Callable] = {}
-        self.received_messages = []
-        self.listen_thread: Optional[threading.Thread] = None
-        
-        # Node identification
-        self.node_id = "DRONE_01"  # Default node ID
-        
-    def connect(self) -> bool:
+        self.xbee_device: XBeeDevice = None
+        self.local_xbee_address: XBee64BitAddress = None
+        self.is_api_mode: bool = False 
+
+        # Gelen ve giden sinyalleri depolamak için thread-safe kuyruk
+        self.signal_queue = deque()
+        self.queue_lock = threading.Lock()
+
+        print(f"XBeeModule başlatılıyor: Port={self.port}, Baudrate={self.baudrate}")
+    
+    def connect(self):
         """
-        Connect to the XBee module.
-        
-        Returns:
-            bool: True if connection successful, False otherwise
+        Seri porta bağlanır ve XBee cihazını başlatır.
+        `XBeeDevice.open()` metodunun kendi mod algılama esnekliğini kullanır.
         """
-        try:
-            self.serial_connection = serial.Serial(
-                port=self.port,
-                baudrate=self.baudrate,
-                timeout=self.timeout,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE,
-                bytesize=serial.EIGHTBITS
-            )
-            
-            # Wait for connection to stabilize
-            time.sleep(2)
-            
-            if self.serial_connection.is_open:
-                self.is_connected = True
-                print(f"-- XBee connected on {self.port} at {self.baudrate} baud")
-                return True
-            else:
-                print(f"-- Failed to open XBee port {self.port}")
-                return False
-                
-        except serial.SerialException as e:
-            print(f"-- XBee connection error: {e}")
-            return False
-            
-    def disconnect(self) -> None:
-        """Disconnect from the XBee module."""
-        self.stop_listening()
-        
-        if self.serial_connection and self.serial_connection.is_open:
-            self.serial_connection.close()
-            self.is_connected = False
-            print("-- XBee disconnected")
-            
-    def set_node_id(self, node_id: str) -> None:
-        """Set the node ID for this XBee module."""
-        self.node_id = node_id
-        print(f"-- Node ID set to: {node_id}")
-        
-    def send_message(self, receiver: str, message_type: str, payload: Dict[str, Any]) -> bool:
-        """
-        Send a message via XBee.
-        """
-        if not self.is_connected or not self.serial_connection:
-            print("-- XBee not connected")
-            return False
-            
-        try:
-            message = XBeeMessage(
-                sender=self.node_id,
-                receiver=receiver,
-                message_type=message_type,
-                payload=payload,
-                timestamp=time.time()
-            )
-            
-            # Convert to JSON
-            json_message = json.dumps({
-                'sender': message.sender,
-                'receiver': message.receiver,
-                'type': message.message_type,
-                'payload': message.payload,
-                'timestamp': message.timestamp
-            })
-            
-            # Encode as hex to avoid binary data issues
-            hex_message = json_message.encode('utf-8').hex()
-            formatted_message = f"<HEX>{hex_message}<END>\n"
-            
-            self.serial_connection.write(formatted_message.encode('ascii'))
-            print(f"-- Sent to {receiver}: {message_type}")
+        if self.xbee_device and self.xbee_device.is_open():
+            print("XBee zaten bağlı.")
             return True
-            
-        except Exception as e:
-            print(f"-- Error sending message: {e}")
-            return False
-            
-    def send_telemetry(self, receiver: str, telemetry_data: Dict[str, Any]) -> bool:
-        """
-        Send telemetry data.
-        
-        Args:
-            receiver: Target node ID
-            telemetry_data: Telemetry information
-            
-        Returns:
-            bool: True if sent successfully
-        """
-        return self.send_message(receiver, "telemetry", telemetry_data)
-        
-    def send_command(self, receiver: str, command: str, parameters: Dict[str, Any] = None) -> bool:
-        """
-        Send a command message.
-        
-        Args:
-            receiver: Target node ID
-            command: Command name
-            parameters: Command parameters
-            
-        Returns:
-            bool: True if sent successfully
-        """
-        payload = {"command": command}
-        if parameters:
-            payload["parameters"] = parameters
-            
-        return self.send_message(receiver, "command", payload)
-        
-    def send_status(self, receiver: str, status: str, details: Dict[str, Any] = None) -> bool:
-        """
-        Send a status message.
-        
-        Args:
-            receiver: Target node ID
-            status: Status description
-            details: Additional status details
-            
-        Returns:
-            bool: True if sent successfully
-        """
-        payload = {"status": status}
-        if details:
-            payload["details"] = details
-            
-        return self.send_message(receiver, "status", payload)
-        
-    def start_listening(self) -> None:
-        """Start listening for incoming messages in a separate thread."""
-        if self.is_listening:
-            print("-- Already listening for messages")
-            return
-            
-        if not self.is_connected:
-            print("-- Cannot start listening: XBee not connected")
-            return
-            
-        self.is_listening = True
-        self.listen_thread = threading.Thread(target=self._listen_for_messages, daemon=True)
-        self.listen_thread.start()
-        print("-- Started listening for XBee messages")
-        
-    def stop_listening(self) -> None:
-        """Stop listening for incoming messages."""
-        self.is_listening = False
-        if self.listen_thread:
-            self.listen_thread.join(timeout=2)
-        print("-- Stopped listening for XBee messages")
-        
-    def _listen_for_messages(self) -> None:
-        """Internal method to listen for incoming messages."""
-        buffer = ""
-        
-        while self.is_listening and self.serial_connection:
-            try:
-                if self.serial_connection.in_waiting > 0:
-                    # Read as ASCII only
-                    raw_data = self.serial_connection.read(self.serial_connection.in_waiting)
-                    data = raw_data.decode('ascii', errors='ignore')
-                    buffer += data
-                    
-                    # Process HEX encoded messages
-                    while "<HEX>" in buffer and "<END>" in buffer:
-                        start_idx = buffer.find("<HEX>") + 5
-                        end_idx = buffer.find("<END>")
-                        
-                        if end_idx > start_idx:
-                            hex_str = buffer[start_idx:end_idx]
-                            buffer = buffer[end_idx + 5:]
-                            
-                            try:
-                                # Decode hex back to JSON
-                                message_str = bytes.fromhex(hex_str).decode('utf-8')
-                                self._process_received_message(message_str)
-                            except (ValueError, UnicodeDecodeError):
-                                print("-- Invalid hex message received")
-                        else:
-                            break
-                            
-                time.sleep(0.01)
-                
-            except Exception as e:
-                print(f"-- Error in message listening: {e}")
-                buffer = ""
-                time.sleep(0.1)
-                
-    def _process_received_message(self, message_str: str) -> None:
-        """Process a received message."""
         try:
-            message_data = json.loads(message_str)
+            self.xbee_device = XBeeDevice(self.port, self.baudrate)
+            self.xbee_device.open()
             
-            message = XBeeMessage(
-                sender=message_data['sender'],
-                receiver=message_data['receiver'],
-                message_type=message_data['type'],
-                payload=message_data['payload'],
-                timestamp=message_data['timestamp']
-            )
+            print(f"XBee modülü '{self.port}' portuna başarıyla bağlandı.")
             
-            # Store message
-            self.received_messages.append(message)
-            
-            # Call registered callback if available
-            if message.message_type in self.message_callbacks:
-                self.message_callbacks[message.message_type](message)
-            
-            print(f"-- Received from {message.sender}: {message.message_type}")
-            
-        except json.JSONDecodeError as e:
-            print(f"-- Error parsing received message: {e}")
-        except KeyError as e:
-            print(f"-- Missing field in received message: {e}")
-            
-    def register_callback(self, message_type: str, callback: Callable[[XBeeMessage], None]) -> None:
-        """
-        Register a callback function for a specific message type.
-        
-        Args:
-            message_type: Type of message to handle
-            callback: Function to call when message is received
-        """
-        self.message_callbacks[message_type] = callback
-        print(f"-- Registered callback for message type: {message_type}")
-        
-    def get_received_messages(self, message_type: Optional[str] = None) -> list:
-        """
-        Get received messages, optionally filtered by type.
-        
-        Args:
-            message_type: Filter by message type (optional)
-            
-        Returns:
-            list: List of received messages
-        """
-        if message_type:
-            return [msg for msg in self.received_messages if msg.message_type == message_type]
-        return self.received_messages.copy()
-        
-    def clear_messages(self) -> None:
-        """Clear the received messages buffer."""
-        self.received_messages.clear()
-        print("-- Cleared message buffer")
-        
-    def get_connection_status(self) -> Dict[str, Any]:
-        """
-        Get current connection status.
-        
-        Returns:
-            dict: Connection status information
-        """
-        return {
-            "is_connected": self.is_connected,
-            "is_listening": self.is_listening,
-            "port": self.port,
-            "baudrate": self.baudrate,
-            "node_id": self.node_id,
-            "messages_received": len(self.received_messages)
-        }
+            # Bağlantı başarılıysa, API modunda olup olmadığını denemeye devam edebiliriz.
+            # Ancak hata verse bile bağlantıyı kesmeyeceğiz.
+            try:
+                ap_mode_param = self.xbee_device.get_parameter("AP")
+                if ap_mode_param == b'\x01' or ap_mode_param == b'\x02':
+                    self.is_api_mode = True
+                    print("XBee modülü API modunda çalışıyor.")
+                    self.local_xbee_address = self.xbee_device.get_64bit_addr()
+                    print(f"Kendi adresim (API Modu): {self.local_xbee_address.address.hex()}")
+                else:
+                    self.is_api_mode = False
+                    print("XBee modülü AT modunda (Transparent) çalışıyor.")
+                    self.local_xbee_address = None
+            except XBeeException as e:
+                self.is_api_mode = False
+                print(f"Uyarı: XBee modülü AT modunda olabilir (AP komutu hatası: {e}). Bağlantı AT modunda devam ediyor.")
+                self.local_xbee_address = None
 
+            self.xbee_device.add_data_received_callback(self._receive_data_callback)
+            return True
+        except serial.SerialException as e:
+            print(f"Hata: Seri porta bağlanılamadı: {e}")
+            self.disconnect()
+            return False
+        except XBeeException as e:
+            print(f"Hata: XBee cihaza bağlanılamadı veya yapılandırılamadı: {e}")
+            self.disconnect()
+            return False
+        except Exception as e:
+            print(f"Beklenmedik bir hata oluştu: {e}")
+            self.disconnect()
+            return False
 
-# Example usage and test functions
-def example_telemetry_callback(message: XBeeMessage) -> None:
-    """Example callback for telemetry messages."""
-    print(f"Telemetry from {message.sender}: {message.payload}")
-
-
-def example_command_callback(message: XBeeMessage) -> None:
-    """Example callback for command messages."""
-    print(f"Command from {message.sender}: {message.payload}")
-
-
-def main():
-    """Example usage of XBeeModule."""
-    # Initialize XBee module
-    xbee = XBeeModule(port="/dev/ttyUSB0", baudrate=57600)
-    xbee.set_node_id("DRONE_01")
-    
-    # Connect to XBee
-    if not xbee.connect():
-        print("Failed to connect to XBee")
-        return
+    def disconnect(self):
+        """
+        XBee cihazını kapatır ve seri port bağlantısını keser.
+        """
+        if self.xbee_device and self.xbee_device.is_open():
+            self.xbee_device.close()
+            print(f"XBee bağlantısı '{self.port}' portunda kesildi.")
+        else:
+            print("XBee zaten bağlı değil.")
         
-    # Register message callbacks
-    xbee.register_callback("telemetry", example_telemetry_callback)
-    xbee.register_callback("command", example_command_callback)
-    
-    # Start listening for messages
-    xbee.start_listening()
-    
-    try:
-        # Send some example messages
-        xbee.send_telemetry("BASE_STATION", {
-            "lat": 47.397606,
-            "lon": 8.543060,
-            "alt": 450.0,
-            "battery": 85.5
-        })
+        self.xbee_device = None
+        self.local_xbee_address = None
+        self.is_api_mode = False
+
+    def send_package(self, package: XBeePackage, remote_xbee_addr_hex: str = None):
+        """
+        Belirtilen XBeePackage nesnesini belirli bir hedefe gönderir.
+        Moda göre farklı gönderme metotları kullanır.
+        :param package: Gönderilecek XBeePackage nesnesi.
+        :param remote_xbee_addr_hex: Hedef XBee'nin 64-bit adresi (hex string olarak).
+                                  Sadece API modunda kullanılır. AT modunda bu parametre göz ardı edilir.
+                                  Yayın için: "000000000000FFFF" (Zigbee için)
+                                  Eğer None ise ve API modundaysa, broadcast göndermeyi dener.
+        """
+        if not self.xbee_device or not self.xbee_device.is_open():
+            print("Hata: XBee cihazı bağlı değil. Önce connect() metodunu çağırın.")
+            return False
         
-        xbee.send_status("BASE_STATION", "mission_started", {
-            "mission_type": "waypoint",
-            "waypoints": 3
-        })
+        data_to_send = bytes(package)
         
-        # Keep running and listening
-        while True:
-            time.sleep(1)
-            status = xbee.get_connection_status()
-            if status["messages_received"] > 0:
-                print(f"Total messages received: {status['messages_received']}")
+        if len(data_to_send) > 70:
+            print(f"Uyarı: Gönderilen paket boyutu ({len(data_to_send)} bayt) XBee limitini aşabilir.")
+
+        try:
+            if self.is_api_mode:
+                if remote_xbee_addr_hex:
+                    # API modunda belirli bir adrese gönderme
+                    remote_addr_obj = XBee64BitAddress(bytes.fromhex(remote_xbee_addr_hex)) 
+                    remote_xbee = RemoteXBeeDevice(self.xbee_device, remote_addr_obj)
+                    self.xbee_device.send_data(remote_xbee, data_to_send)
+                    print(f"Paket API modunda gönderildi: Tipi='{package.package_type}', Hedef='{remote_xbee_addr_hex}', Boyut={len(data_to_send)} bayt")
+                else:
+                    # API modunda broadcast
+                    self.xbee_device.send_data_broadcast(data_to_send)
+                    print(f"Paket API modunda BROADCAST edildi: Tipi='{package.package_type}', Boyut={len(data_to_send)} bayt")
+            else:
+                # AT modunda, doğrudan seri porttan ham veri gönderir.
+                # AT modunda spesifik bir adrese gönderme mümkün değildir, varsayılan DM/DL ayarına gider.
+                self.xbee_device.send_data_local(data_to_send)
+                print(f"Paket AT modunda gönderildi (Transparent): Tipi='{package.package_type}', Boyut={len(data_to_send)} bayt")
+            with self.queue_lock:
+                self.signal_queue.append((time.time(), 'OUT', package.to_json()))
+            return True
+        except TimeoutException:
+            print(f"Hata: Paket gönderilirken zaman aşımı oluştu. Hedef XBee ulaşılamıyor olabilir.")
+            return False
+        except XBeeException as e:
+            print(f"Hata: XBee gönderme hatası: {e}")
+            return False
+        except Exception as e:
+            print(f"Beklenmedik bir hata oluştu paket gönderilirken: {e}")
+            return False
+
+    def _receive_data_callback(self, xbee_message):
+        """
+        XBee'den veri geldiğinde otomatik olarak çağrılan geri çağırma fonksiyonu.
+        Gelen verinin formatını moda göre işler ve kuyruğa ekler.
+        """
+        data = xbee_message.data
+        
+        remote_address_64bit = None
+        if hasattr(xbee_message, 'remote_device') and xbee_message.remote_device:
+            try:
+                remote_address_64bit = xbee_message.remote_device.get_64bit_addr().address.hex() 
+            except Exception as e:
+                print(f"Uyarı: Uzak cihaz adres bilgisi alınamadı (geri çağırma içinde): {e}")
+            
+        try:
+            received_package = XBeePackage.from_bytes(data)
+            
+            print(f"\n<<< Paket Alındı >>>")
+            if remote_address_64bit:
+                print(f"  Kaynak XBee Adresi (64-bit): {remote_address_64bit}")
+            else:
+                print(f"  Kaynak Adres Bilgisi Yok (AT Modu Varsayıldı)")
                 
+            print(f"  Tip: {received_package.package_type}")
+            print(f"  Gönderen: {received_package.sender}")
+            if received_package.params:
+                print(f"  Parametreler: {received_package.params}")
+            
+            with self.queue_lock:
+                self.signal_queue.append((time.time(), 'IN', received_package.to_json()))
+
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            try:
+                print(f"\n<<< Ham Metin Verisi Alındı >>>")
+                print(f"  Veri: {data.decode('utf-8')}")
+                if remote_address_64bit:
+                    print(f"  Kaynak XBee Adresi (64-bit): {remote_address_64bit}")
+                else:
+                    print(f"  Kaynak Adres Bilgisi Yok (AT Modu Varsayıldı)")
+            except UnicodeDecodeError:
+                print(f"\n<<< Ham Bayt Verisi Alındı >>>")
+                print(f"  Veri (Hex): {data.hex()}")
+                if remote_address_64bit:
+                    print(f"  Kaynak XBee Adresi (64-bit): {remote_address_64bit}")
+                else:
+                    print(f"  Kaynak Adres Bilgisi Yok (AT Modu Varsayıldı)")
+            print(f"  Hata: Gelen veri XBeePackage formatında olmayabilir. Çözümleme hatası: {e}")
+            with self.queue_lock:
+                self.signal_queue.append((time.time(), 'IN', data.hex()))
+        except Exception as e:
+            print(f"Hata: Gelen paket işlenirken beklenmedik sorun oluştu: {e}")
+            with self.queue_lock:
+                self.signal_queue.append((time.time(), 'IN', "Hata: " + str(e)))
+
+    def clean_queue(self):
+        """
+        Belirli bir süreden eski kuyruk öğelerini temizler.
+        Ayrı bir thread olarak çalışır.
+        """
+        while True:
+            now = time.time()
+            with self.queue_lock:
+                # QUEUE_RETENTION global değişkene erişim sağlandı
+                while self.signal_queue and now - self.signal_queue[0][0] > QUEUE_RETENTION: 
+                    self.signal_queue.popleft()
+            time.sleep(1)
+
+
+# --- Ana Program Akışı (XBeeModule kullanılarak) ---
+if __name__ == '__main__':
+    import platform
+
+    # Kullanıcıdan seri port bilgisini al
+    print('XBee bağlantısı için port girin')
+    if platform.system() == 'nt':
+        input_user = "COM"+str(input('COM? :'))
+    elif platform.system() == 'Linux':
+        input_user = "/dev/"+str(input('/dev/? :'))
+    else:
+        input_user = str(input(' :'))
+    
+    # XBeeModule nesnesini başlat
+    # Baud rate, global DEFAULT_BAUD_RATE değişkeninden alınır.
+    my_xbee_module = XBeeModule(port=input_user, baudrate=DEFAULT_BAUD_RATE) 
+
+    # XBee bağlantısını kur
+    if not my_xbee_module.connect():
+        print("XBee bağlantısı kurulamadı. Lütfen portun doğru olduğundan ve XBee'nin çalıştığından emin olun.")
+        exit()
+    
+    # Broadcast adresi (API modunda kullanılabilir)
+    BROADCAST_64BIT_ADDR = "000000000000FFFF"
+
+    try:
+        # Periyodik gönderim fonksiyonu
+        def periodic_sender_function(xbee_mod):
+            while xbee_mod.xbee_device and xbee_mod.xbee_device.is_open():
+                handshake_package = XBeePackage(
+                    package_type="H",
+                    sender="D1",
+                    params={
+                        "la": int(40.7128 * 1000000),
+                        "lo": int(-74.0060 * 1000000),
+                        "a": int(150.5 * 10)}
+                )
+                xbee_mod.send_package(handshake_package, remote_xbee_addr_hex=BROADCAST_64BIT_ADDR)
+                # SEND_INTERVAL global değişkene erişim sağlandı
+                time.sleep(SEND_INTERVAL) 
+
+        # Veri okuma thread`ini başlat
+        # Okuma thread'ini başlat
+        read_thread = threading.Thread(target=read_from_port, daemon=True)
+        read_thread.start()
+
+
+        # Veri gönderme thread'ini başlat
+        sender_thread = threading.Thread(target=periodic_sender_function, args=(my_xbee_module,), daemon=True)
+        sender_thread.start()
+
+        # Kuyruk temizleyici thread'ini başlat
+        cleaner_thread = threading.Thread(target=my_xbee_module.clean_queue, name="CleanerThread", daemon=True)
+        cleaner_thread.start()
+
+        # Ana thread'i, programın çıkışını bekleyecek şekilde tut
+        input("Çıkmak için Enter'a basın...\n")
+
     except KeyboardInterrupt:
-        print("\nShutting down...")
+        print("\nProgram sonlandırılıyor...")
     finally:
-        xbee.disconnect()
-
-
-if __name__ == "__main__":
-    main()
+        # Program sonlandığında XBee bağlantısını kapat
+        my_xbee_module.disconnect()
