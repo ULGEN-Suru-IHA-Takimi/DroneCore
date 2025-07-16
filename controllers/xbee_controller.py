@@ -7,15 +7,12 @@ import time
 import threading
 import json
 from collections import deque
+import platform # platform modülünü de ekledim, işletim sistemi kontrolü için gerekli
 
 # --- Global Yapılandırma ve Kuyruklar için Sabitler ---
-# Bu sabitler, programın genel ayarlarını belirler ve her yerden erişilebilir olmalıdır.
-# Kendi XBee'nizin gerçek baud rate'ini buraya yazmalısınız. Genellikle XBee'ler 9600 baud ile başlar.
-DEFAULT_BAUD_RATE = 57600 # Bu değeri XBee'nizin gerçek baud rate'ine göre ayarlayın!
-
-# Veri gönderme ve kuyruk yönetimi için ayarlar
-SEND_INTERVAL = 1  # Saniyede 10 kez gönderim (1/0.1). Daha yavaş olması gerekiyorsa artırın.
-QUEUE_RETENTION = 10 # Saniye, kuyrukta tutulma süresi.
+DEFAULT_BAUD_RATE = 57600
+SEND_INTERVAL = 1
+QUEUE_RETENTION = 10
 
 # --- XBeePackage Sınıfı ---
 class XBeePackage:
@@ -32,7 +29,7 @@ class XBeePackage:
 
     def to_json(self):
         """
-        Paketi JSON formatında bir Python sözlüğüne dönüştürür.
+        Paketi JSON formatına dönüştürür.
         """
         data = {
             "t": self.package_type,
@@ -48,9 +45,13 @@ class XBeePackage:
         """
         json_data = json.dumps(self.to_json())
         encoded_data = json_data.encode('utf-8')
-        if len(encoded_data) > 70: # Bu değer XBee modelinize göre değişebilir (genelde 72-100 byte)
+        if len(encoded_data) > 70: 
             print(f"Uyarı: Gönderilen paket boyutu ({len(encoded_data)} bayt) XBee limitini aşabilir. Veri kaybı yaşanabilir.")
         return encoded_data
+    
+    def __str__(self):
+        return f"t:{self.package_type}, s:{self.sender},p:{self.params}"
+            
     
     @classmethod
     def from_bytes(cls, byte_data):
@@ -68,7 +69,7 @@ class XBeePackage:
 
 # --- XBeeModule Sınıfı ---
 class XBeeModule:
-    def __init__(self, port: str, baudrate: int): # Port ve baudrate doğrudan alınmalı
+    def __init__(self, port: str, baudrate: int): 
         """
         XBee modülünü başlatır ve seri port ayarlarını yapar.
         :param port: XBee modülünün bağlı olduğu seri port.
@@ -100,8 +101,6 @@ class XBeeModule:
             
             print(f"XBee modülü '{self.port}' portuna başarıyla bağlandı.")
             
-            # Bağlantı başarılıysa, API modunda olup olmadığını denemeye devam edebiliriz.
-            # Ancak hata verse bile bağlantıyı kesmeyeceğiz.
             try:
                 ap_mode_param = self.xbee_device.get_parameter("AP")
                 if ap_mode_param == b'\x01' or ap_mode_param == b'\x02':
@@ -118,6 +117,7 @@ class XBeeModule:
                 print(f"Uyarı: XBee modülü AT modunda olabilir (AP komutu hatası: {e}). Bağlantı AT modunda devam ediyor.")
                 self.local_xbee_address = None
 
+            # BURASI ÖNEMLİ: XBee'den veri geldiğinde çağrılacak metodu atama
             self.xbee_device.add_data_received_callback(self._receive_data_callback)
             return True
         except serial.SerialException as e:
@@ -258,7 +258,6 @@ class XBeeModule:
         while True:
             now = time.time()
             with self.queue_lock:
-                # QUEUE_RETENTION global değişkene erişim sağlandı
                 while self.signal_queue and now - self.signal_queue[0][0] > QUEUE_RETENTION: 
                     self.signal_queue.popleft()
             time.sleep(1)
@@ -267,6 +266,20 @@ class XBeeModule:
 # --- Ana Program Akışı (XBeeModule kullanılarak) ---
 if __name__ == '__main__':
     import platform
+
+    gps_package = XBeePackage(
+        package_type="G",
+        sender="1",
+        params={
+            "la": int(40.7128 * 10000),
+            "lo": int(-74.0060 * 10000),
+            "a": int(150.5 * 10)}
+    )
+
+    
+    bytes(gps_package)
+
+
 
     # Kullanıcıdan seri port bilgisini al
     print('XBee bağlantısı için port girin')
@@ -278,7 +291,6 @@ if __name__ == '__main__':
         input_user = str(input(' :'))
     
     # XBeeModule nesnesini başlat
-    # Baud rate, global DEFAULT_BAUD_RATE değişkeninden alınır.
     my_xbee_module = XBeeModule(port=input_user, baudrate=DEFAULT_BAUD_RATE) 
 
     # XBee bağlantısını kur
@@ -293,22 +305,17 @@ if __name__ == '__main__':
         # Periyodik gönderim fonksiyonu
         def periodic_sender_function(xbee_mod):
             while xbee_mod.xbee_device and xbee_mod.xbee_device.is_open():
-                handshake_package = XBeePackage(
-                    package_type="H",
-                    sender="D1",
+                gps_package = XBeePackage(
+                    package_type="G",
+                    sender="1",
                     params={
-                        "la": int(40.7128 * 1000000),
-                        "lo": int(-74.0060 * 1000000),
+                        "la": int(40.7128 * 10000),
+                        "lo": int(-74.0060 * 10000),
                         "a": int(150.5 * 10)}
                 )
-                xbee_mod.send_package(handshake_package, remote_xbee_addr_hex=BROADCAST_64BIT_ADDR)
-                # SEND_INTERVAL global değişkene erişim sağlandı
+                xbee_mod.send_package(gps_package, remote_xbee_addr_hex=BROADCAST_64BIT_ADDR)
                 time.sleep(SEND_INTERVAL) 
 
-        # Veri okuma thread`ini başlat
-        # Okuma thread'ini başlat
-        read_thread = threading.Thread(target=read_from_port, daemon=True)
-        read_thread.start()
 
 
         # Veri gönderme thread'ini başlat
