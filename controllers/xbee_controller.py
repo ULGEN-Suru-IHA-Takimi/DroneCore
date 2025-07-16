@@ -197,6 +197,12 @@ class XBeeModule:
             print(f"Beklenmedik bir hata oluştu paket gönderilirken: {e}")
             return False
 
+    def read_package(self):
+        if self.signal_queue:
+            first_package = self.signal_queue.popleft()
+            if first_package[1] == "IN":
+                return first_package[2]
+
     def _receive_data_callback(self, xbee_message):
         """
         XBee'den veri geldiğinde otomatik olarak çağrılan geri çağırma fonksiyonu.
@@ -228,7 +234,6 @@ class XBeeModule:
             with self.queue_lock:
                 self.signal_queue.append((time.time(), 'IN', received_package.to_json()))
 
-            return received_package
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             try:
                 print(f"\n<<< Ham Metin Verisi Alındı >>>")
