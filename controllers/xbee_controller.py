@@ -213,7 +213,6 @@ class XBeeModule:
             
         try:
             received_package = XBeePackage.from_bytes(data)
-            
             print(f"\n<<< Paket Alındı >>>")
             if remote_address_64bit:
                 print(f"  Kaynak XBee Adresi (64-bit): {remote_address_64bit}")
@@ -229,6 +228,7 @@ class XBeeModule:
             with self.queue_lock:
                 self.signal_queue.append((time.time(), 'IN', received_package.to_json()))
 
+            return received_package
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             try:
                 print(f"\n<<< Ham Metin Verisi Alındı >>>")
@@ -295,9 +295,8 @@ if __name__ == '__main__':
                     package_type="G",
                     sender="1",
                     params={
-                        "x": int(40.7128 * 10000),
-                        "y": int(-74.0060 * 10000),
-                        "z": int(150.5 * 10)}
+                        "x": int(40.712800 * 1000000),
+                        "y": int(-74.006000 * 1000000)}
                 )
                 xbee_mod.send_package(gps_package, remote_xbee_addr_hex=BROADCAST_64BIT_ADDR)
                 time.sleep(SEND_INTERVAL) 
