@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import asyncio
+from email.mime import message
 from mavsdk import System
 import os
 import sys
 from typing import List, Dict, Any, TypedDict, Tuple
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from connect.drone_connection import DroneConnection
-
+from status_controller import StatusController
 # Waypoint tuple formatı: (lat, lon, alt, heading)
 WaypointTuple = Tuple[float, float, float, float]
 
@@ -17,10 +18,11 @@ class Waypoint(TypedDict):
     speed: float
 
 class DroneController(DroneConnection):
-    def __init__(self, sys_address="udpin://0.0.0.0:14540"):
+    def __init__(self, sys_address="udpin://0.0.0.0:14540", xbee_port="/dev/ttyUSB0", xbee_baud_rate=57600):
         super().__init__(sys_address=sys_address)
         self.waypoints: List[WaypointTuple] = []
         self.flying_alt: float = 0.0
+        self.xbee_controller = StatusController(port=xbee_port, baud_rate=xbee_baud_rate)
 
     def set_waypoints(self, waypoints: List[WaypointTuple] = [
         (47.397606, 8.543060, 20.0, 0),    # Waypoint 1  
@@ -87,9 +89,24 @@ class DroneController(DroneConnection):
             while not target_reached:
                 async for position in self.drone.telemetry.position():
                     # Calculate distance to target (simple approximation)
-                    print(f"Current position: ({position.latitude_deg}, {position.longitude_deg})")
+                    self.status_controler.set_gps_callback(
+                        position.latitude_deg,
+                        position.longitude_deg,
+                        position.relative_altitude_m,
+                        yaw,
+                        int(position.timestamp)
+                    )
+                    
+                    self.xbee_controller.send_gps_data({
+                        'latitude': position.latitude_deg,
+                        'longitude': position.longitude_deg,
+                        'altitude': position.relative_altitude_m,
+                        'heading': yaw,
+                        'timestamp': int(position.timestamp)
+                    })
                     lat_diff = abs(position.latitude_deg - lat)
                     lon_diff = abs(position.longitude_deg - lon)
+                    
                     
                     # If we're close enough (within ~10 meters)
                     if lat_diff < 0.0001 and lon_diff < 0.0001:
