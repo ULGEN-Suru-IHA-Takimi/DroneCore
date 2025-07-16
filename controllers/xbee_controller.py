@@ -7,12 +7,12 @@ import time
 import threading
 import json
 from collections import deque
-import platform # platform modülünü de ekledim, işletim sistemi kontrolü için gerekli
+import platform 
 
 # --- Global Yapılandırma ve Kuyruklar için Sabitler ---
 DEFAULT_BAUD_RATE = 57600
-SEND_INTERVAL = 1
-QUEUE_RETENTION = 10
+SEND_INTERVAL = 1  
+QUEUE_RETENTION = 10 
 
 # --- XBeePackage Sınıfı ---
 class XBeePackage:
@@ -118,6 +118,7 @@ class XBeeModule:
                 self.local_xbee_address = None
 
             # BURASI ÖNEMLİ: XBee'den veri geldiğinde çağrılacak metodu atama
+            # Bu, gelen paketlerin otomatik olarak işlenmesini sağlar.
             self.xbee_device.add_data_received_callback(self._receive_data_callback)
             return True
         except serial.SerialException as e:
@@ -217,7 +218,8 @@ class XBeeModule:
             if remote_address_64bit:
                 print(f"  Kaynak XBee Adresi (64-bit): {remote_address_64bit}")
             else:
-                print(f"  Kaynak Adres Bilgisi Yok (AT Modu Varsayıldı)")
+                # Bu satır API modunda, RemoteXBeeDevice bilgisi varsa görünmeyecektir.
+                print(f"  Kaynak Adres Bilgisi Yok (AT Modu Varsayıldı)") 
                 
             print(f"  Tip: {received_package.package_type}")
             print(f"  Gönderen: {received_package.sender}")
@@ -265,22 +267,6 @@ class XBeeModule:
 
 # --- Ana Program Akışı (XBeeModule kullanılarak) ---
 if __name__ == '__main__':
-    import platform
-
-    gps_package = XBeePackage(
-        package_type="G",
-        sender="1",
-        params={
-            "la": int(40.7128 * 10000),
-            "lo": int(-74.0060 * 10000),
-            "a": int(150.5 * 10)}
-    )
-
-    
-    bytes(gps_package)
-
-
-
     # Kullanıcıdan seri port bilgisini al
     print('XBee bağlantısı için port girin')
     if platform.system() == 'nt':
@@ -309,14 +295,12 @@ if __name__ == '__main__':
                     package_type="G",
                     sender="1",
                     params={
-                        "la": int(40.7128 * 10000),
-                        "lo": int(-74.0060 * 10000),
-                        "a": int(150.5 * 10)}
+                        "x": int(40.7128 * 10000),
+                        "y": int(-74.0060 * 10000),
+                        "z": int(150.5 * 10)}
                 )
                 xbee_mod.send_package(gps_package, remote_xbee_addr_hex=BROADCAST_64BIT_ADDR)
                 time.sleep(SEND_INTERVAL) 
-
-
 
         # Veri gönderme thread'ini başlat
         sender_thread = threading.Thread(target=periodic_sender_function, args=(my_xbee_module,), daemon=True)

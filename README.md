@@ -15,27 +15,27 @@ gps_package = XBeePackage(
     package_type="G",
     sender="1",
     params={
-        "la": int(40.7128 * 10000),
-        "lo": int(-74.0060 * 10000),
-        "a": int(150.5 * 10)}
+        "x": int(40.7128 * 10000),
+        "y": int(-74.0060 * 10000),
+        "z": int(150.5 * 10)}
 )
 
 add_waypoint_package = XBeePackage(
     package_type="W",
     sender=f"{waypoint_no}",
     params={
-        "la": int(40.7128 * 10000),
-        "lo": int(-74.0060 * 10000),
-        "a": int(150.5 * 10)}
+        "x": int(40.7128 * 10000),
+        "y": int(-74.0060 * 10000),
+        "z": int(150.5 * 10)}
 )
 
 remove_waypoint_package = XBeePackage(
     package_type="w",
     sender=f"{waypoint_no}",
     params={
-        "la": int(40.7128 * 10000),
-        "lo": int(-74.0060 * 10000),
-        "a": int(150.5 * 10)}
+        "x": int(40.7128 * 10000),
+        "y": int(-74.0060 * 10000),
+        "z": int(150.5 * 10)}
 )
 
 order_package = XBeePackage(
