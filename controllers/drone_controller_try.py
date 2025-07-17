@@ -13,6 +13,7 @@ from connect.drone_connection import DroneConnection
 
 class DroneController(DroneConnection):
     def __init__(self, sys_address="udpin://0.0.0.0:14540", port: str = "/dev/ttyUSB0", drone_id: str = "1", baudrate: int = DEFAULT_BAUD_RATE):
+        super().__init__(sys_address=sys_address)
         self.flying_alt = 0
         self.target_alt = 20.0
 
