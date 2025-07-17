@@ -233,7 +233,7 @@ async def main(sys_address="udpin://0.0.0.0:14540"): # main fonksiyonu
         return # Programı burada sonlandır
 
     # Asenkron görevleri başlat
-    #telemetry_task = asyncio.create_task(my_drone.send_telemetry_loop())
+    telemetry_task = asyncio.create_task(my_drone.send_telemetry_loop())
     message_processing_task = asyncio.create_task(my_drone.process_messages_loop())
 
     try:
