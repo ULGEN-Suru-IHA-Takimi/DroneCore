@@ -1,4 +1,4 @@
-waypoints = {}
+
 class waypoints:
     def __init__(self):
         self.list={}
