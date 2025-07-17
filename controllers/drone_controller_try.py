@@ -46,7 +46,7 @@ class DroneController(DroneConnection):
         self.is_xbee_connected = False
         print(f"DroneController {self.drone_id}: XBee bağlantısı kesildi.")
 
-    async def send_telemetry_loop(self) ->None:
+    async def send_telemetry_loop(self) -> None:
         """
         Dronun güncel telemetri verilerini periyodik olarak gönderir.
         """
@@ -233,7 +233,7 @@ async def main(sys_address="udpin://0.0.0.0:14540"): # main fonksiyonu
         return # Programı burada sonlandır
 
     # Asenkron görevleri başlat
-    telemetry_task = asyncio.create_task(my_drone.send_telemetry_loop())
+    #telemetry_task = asyncio.create_task(my_drone.send_telemetry_loop())
     message_processing_task = asyncio.create_task(my_drone.process_messages_loop())
 
     try:
