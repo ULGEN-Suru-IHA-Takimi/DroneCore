@@ -16,8 +16,7 @@ gps_package = XBeePackage(
     sender="1",
     params={
         "x": int(40.7128 * 10000),
-        "y": int(-74.0060 * 10000),
-        "z": int(150.5 * 10)}
+        "y": int(-74.0060 * 10000)}
 )
 
 add_waypoint_package = XBeePackage(
@@ -25,17 +24,12 @@ add_waypoint_package = XBeePackage(
     sender=f"{waypoint_no}",
     params={
         "x": int(40.7128 * 10000),
-        "y": int(-74.0060 * 10000),
-        "z": int(150.5 * 10)}
+        "y": int(-74.0060 * 10000)}
 )
 
 remove_waypoint_package = XBeePackage(
     package_type="w",
-    sender=f"{waypoint_no}",
-    params={
-        "x": int(40.7128 * 10000),
-        "y": int(-74.0060 * 10000),
-        "z": int(150.5 * 10)}
+    sender=f"{waypoint_no}"
 )
 
 order_package = XBeePackage(
@@ -48,7 +42,10 @@ order_package = XBeePackage(
 
 mission_confirm_package = XBeePackage(
     package_type="MC",
-    sender="1"
+    sender="1",
+    params={
+        "id": f"{mission_id}"
+    }
 )
 mission_status_package = XBeePackage(
     package_type="MS",
