@@ -3,7 +3,7 @@
 import time
 import platform
 import asyncio
-from waypoint_controller import *
+from waypoint_controller import waypoints, Waypoint
 from xbee_controller import *
 from mavsdk import System
 import os
@@ -17,7 +17,7 @@ class DroneController(DroneConnection):
         self.flying_alt = 0
         self.target_alt = 10.0
 
-        self.waypoint = waypoints()
+        self.waypoint = waypoints() # waypoints sınıfından bir örnek oluşturuyoruz
 
         self.drone_id = drone_id
         self.xbee = XBeeModule(port=port, baudrate=baudrate) 
@@ -30,10 +30,7 @@ class DroneController(DroneConnection):
 
     async def xbee_connect(self):
         """XBee bağlantısını kurar."""
-        # xbee.connect() senkron bir metot olduğundan, bunu doğrudan çağırıyoruz.
-        # Eğer bu işlem uzun sürerse, `loop.run_in_executor` ile ayrı bir thread'de çalıştırılabilir.
-        # Şimdilik, genellikle bağlantı hızlı olduğu için doğrudan çağrı yeterli.
-        self.is_xbee_connected = self.xbee.connect()
+        self.is_xbee_connected = self.xbee.connect() # Senkron çağrı, ayrı bir thread'de çalıştırmaya gerek yok, hızlı
         if self.is_xbee_connected:
             print(f"DroneController {self.drone_id}: XBee bağlantısı başarılı.")
         else:
@@ -49,31 +46,53 @@ class DroneController(DroneConnection):
     async def send_telemetry_loop(self) -> None:
         """
         Dronun güncel telemetri verilerini periyodik olarak gönderir.
+        Gerçek drone konumunu MAVSDK'den alır.
         """
-        current_lat = 40.712800 # Simülasyon için başlangıç değeri
-        current_lon = -74.006000 # Simülasyon için başlangıç değeri
+        last_known_lat = None
+        last_known_lon = None
+        
+        # MAVSDK telemetri akışını başlat
+        position_stream = self.drone.telemetry.position()
+        
+        # Pozisyonu arka planda güncelleyen yardımcı görev
+        async def update_position_from_telemetry():
+            nonlocal last_known_lat, last_known_lon
+            try:
+                async for position in position_stream:
+                    last_known_lat = position.latitude_deg
+                    last_known_lon = position.longitude_deg
+            except asyncio.CancelledError:
+                print("Position stream updater görevi iptal edildi.")
+            except Exception as e:
+                print(f"Pozisyon akışı güncellemede hata: {e}")
 
-        while self.is_xbee_connected:
-            # Telemetri verilerini güncelle (gerçek dron sensörlerinden gelecek)
-            current_lat += 0.000001 
-            current_lon -= 0.000002
+        # Yardımcı görevi başlat
+        position_updater_task = asyncio.create_task(update_position_from_telemetry())
 
-            if time.time() - self.last_telemetry_send_time >= self.telemetry_send_interval:
-                gps_package = XBeePackage(
-                    package_type="G",
-                    sender=self.drone_id,
-                    params={
-                        "x": int(current_lat * 1000000),  
-                        "y": int(current_lon * 1000000), 
-                    }
-                )
-                # send_data senkron olmasına rağmen, XBeeModule zaten thread'leri yönetiyor.
-                # await'e gerek yok, çünkü bloke edici bir G/Ç işlemi yok (kuyruğa ekleme).
-                self.xbee.send_data(gps_package, remote_xbee_addr_hex=self.BROADCAST_ADDR)
-                self.last_telemetry_send_time = time.time()
-                print(f"Drone {self.drone_id}: Telemetri paketi gönderim kuyruğuna eklendi. (Lat: {current_lat:.6f}, Lon: {current_lon:.6f})")
-            
-            await asyncio.sleep(0.1) # Kısa bir bekleme, diğer görevlerin çalışmasına izin verir.
+        try:
+            while self.is_xbee_connected:
+                if last_known_lat is not None and last_known_lon is not None:
+                    if time.time() - self.last_telemetry_send_time >= self.telemetry_send_interval:
+                        gps_package = XBeePackage(
+                            package_type="G",
+                            sender=self.drone_id,
+                            params={
+                                "x": int(last_known_lat * 1000000),  
+                                "y": int(last_known_lon * 1000000), 
+                            }
+                        )
+                        self.xbee.send_data(gps_package, remote_xbee_addr_hex=self.BROADCAST_ADDR)
+                        self.last_telemetry_send_time = time.time()
+                        print(f"Drone {self.drone_id}: Telemetri paketi gönderim kuyruğuna eklendi. (Lat: {last_known_lat:.6f}, Lon: {last_known_lon:.6f})")
+                
+                await asyncio.sleep(0.1) # Diğer görevlerin çalışmasına izin ver
+        finally:
+            # Döngü sonlandığında veya hata oluştuğunda yardımcı görevi iptal et
+            position_updater_task.cancel()
+            try:
+                await position_updater_task # Görevin bitmesini bekle
+            except asyncio.CancelledError:
+                pass # Normal iptal
 
     async def process_messages_loop(self) -> None:
         """
@@ -82,10 +101,9 @@ class DroneController(DroneConnection):
         """
         while self.is_xbee_connected:
             incoming_package_json = self.xbee.read_received_data()
-            if incoming_package_json: # Kuyrukta paket olduğu sürece oku
+            if incoming_package_json: 
                 print(f"\n--- DroneController {self.drone_id} - Gelen Paket İşleniyor ---")
                 
-                # Hata durumlarını kontrol et
                 if "error" in incoming_package_json:
                     print(f"  Paket işleme hatası: {incoming_package_json['error']}")
                     if "raw_data_hex" in incoming_package_json:
@@ -97,7 +115,6 @@ class DroneController(DroneConnection):
                     print(f"  Gönderen: {incoming_package_json.get('s')}")
                     print(f"  Parametreler: {incoming_package_json.get('p')}")
 
-                    # Gelen pakete göre işleme yap
                     package_type = incoming_package_json.get('t')
                     sender_id = incoming_package_json.get('s')
                     params = incoming_package_json.get('p', {})
@@ -106,27 +123,23 @@ class DroneController(DroneConnection):
                             latitude = params.get('x') / 1000000.0 if params.get('x') is not None else "N/A"
                             longitude = params.get('y') / 1000000.0 if params.get('y') is not None else "N/A"
                             print(f"    GPS verisi alındı ve işlendi: Gönderen={sender_id}, Lat={latitude}, Lon={longitude}")
-                            # Burada dronun konumunu güncelleyebilir veya haritaya işleyebilirsiniz.
                         case "H":
                             print(f"    El sıkışma alındı: Gönderen={sender_id}")
                         case "W":
                             latitude = params.get('x') / 1000000.0 if params.get('x') is not None else "N/A"
                             longitude = params.get('y') / 1000000.0 if params.get('y') is not None else "N/A"
-                            heading = 0
+                            heading = params.get('h', 0) # Eğer heading pakette geliyorsa
                             self.waypoint.add(sender_id,latitude,longitude,self.target_alt,heading)
-                            # add_waypoint(sender_id,latitude,longitude) # Eğer waypoint_controller asenkron ise await kullanın
                         case "w":
-                            # remove_waypoint(sender_id) # Eğer waypoint_controller asenkron ise await kullanın
                             self.waypoint.remove(sender_id)
                         case "O":
                             print(f"    Görev için emir/order geldi: Görev id={sender_id}, Parametreler={params}")
                         case "MC":
-                            # print(f"    Göreve başlama onayı geldi: Gönderen={sender_id}, Görev numarası={params[id]}") # 'id' yerine 'id' anahtarı mı olmalı?
                             print(f"    Göreve başlama onayı geldi: Gönderen={sender_id}, Görev numarası={params.get('id', 'N/A')}")
-                        case _: # Bilinmeyen paket tipi
+                        case _: 
                             print(f"    Bilinmeyen paket tipi alındı: {package_type}")
                 
-            await asyncio.sleep(0.01) # Daha sık kontrol için çok kısa bekleme
+            await asyncio.sleep(0.01)
 
     async def get_flying_altitude(self) -> float:
         """Yükseklik alınıyor (home + offset)"""
@@ -135,7 +148,6 @@ class DroneController(DroneConnection):
             absolute_altitude = terrain_info.absolute_altitude_m
             break
         
-        # Fly 20m above the ground plane
         self.flying_alt = absolute_altitude + self.target_alt
         print(f"-- Flying altitude set to: {self.flying_alt}m")
         return self.flying_alt
@@ -148,38 +160,50 @@ class DroneController(DroneConnection):
         print("-- Taking off...")
         await self.drone.action.takeoff()
 
-        # Wait until drone reaches takeoff altitude
-        print("-- Waiting for drone to reach flying altitude...")
-        while True:
-            async for position in self.drone.telemetry.position():
-                if position.relative_altitude_m >= 10.0:  # Wait until at least 10m high
-                    print("-- Drone reached flying altitude, ready for waypoint mission")
-                    break
-            break
+        # Dronun kalkış irtifasına ulaşmasını bekle
+        print(f"-- Waiting for drone to reach flying altitude (target: {self.target_alt}m relative)...")
         
-        await asyncio.sleep(2)  # Extra time to stabilize
+        # Sadece hedef irtifaya ulaşana kadar pozisyon akışını dinle
+        async for position in self.drone.telemetry.position():
+            # Göreceli irtifayı kontrol et
+            current_relative_altitude = position.relative_altitude_m
+            print(f"  Current relative altitude: {current_relative_altitude:.2f}m") # İrtifa takibi için
+            
+            # Hedef irtifanın %90'ına ulaştığında (biraz esneklik için) veya tamamen hedef irtifaya ulaştığında
+            # Koşulu `self.target_alt` ile kullanmak daha mantıklı olacaktır.
+            if current_relative_altitude >= (self.target_alt * 0.95): # Hedef irtifanın %95'i
+                print(f"-- Drone reached flying altitude ({current_relative_altitude:.2f}m relative), ready for waypoint mission")
+                break # Telemetri akışından ve bu asenkron fonksiyondan çık
+        
+        await asyncio.sleep(2)  # Stabilize olması için ekstra bekleme
 
-    async def go_to_waypoints(self,waypoint_ids=("1","2","3")) -> None:
-        for i, in waypoint_ids:
-            waypoint = self.waypoint.read(i)
-            print(f"-- Going to waypoint {i}: ({waypoint.lat}, {waypoint.lon}) at {waypoint.alt}m")
-            await self.drone.action.goto_location(waypoint.lat, waypoint.lon, waypoint.alt, waypoint.yaw)
+    async def go_to_waypoints(self, waypoint_ids=None) -> None:
+        if waypoint_ids is None:
+            print("Uyarı: Gidilecek waypoint ID'si belirtilmedi.")
+            return
 
-            # Give drone time to start moving
+        for i in waypoint_ids:
+            waypoint_obj = self.waypoint.read(i)
+            if waypoint_obj is None:
+                print(f"Hata: Waypoint {i} bulunamadı. Sonraki waypointe geçiliyor.")
+                continue
+
+            print(f"-- Going to waypoint {i}: ({waypoint_obj.lat}, {waypoint_obj.lon}) at {waypoint_obj.alt}m, heading {waypoint_obj.hed}deg")
+            await self.drone.action.goto_location(waypoint_obj.lat, waypoint_obj.lon, waypoint_obj.alt, waypoint_obj.hed)
+
             await asyncio.sleep(2)
 
-            # Wait until we reach the waypoint
             print(f"-- Waypointe uçuluyor {i}...")
             target_reached = False
             while not target_reached:
                 async for position in self.drone.telemetry.position():
-                    lat_diff = abs(position.latitude_deg - waypoint.lat)
-                    lon_diff = abs(position.longitude_deg - waypoint.lon)
-                    # If we're close enough (within ~10 meters)
-                    if lat_diff < 0.0001 and lon_diff < 0.0001:
+                    lat_diff = abs(position.latitude_deg - waypoint_obj.lat)
+                    lon_diff = abs(position.longitude_deg - waypoint_obj.lon)
+                    # Çok daha küçük bir eşik kullanarak daha hassas kontrol
+                    if lat_diff < 0.00001 and lon_diff < 0.00001: 
                         print(f"-- Reached waypoint {i}")
                         target_reached = True
-                        break
+                        break 
                 
                 if not target_reached:
                     await asyncio.sleep(1)
@@ -195,7 +219,6 @@ class DroneController(DroneConnection):
         print("-- iniyor...")
         await self.drone.action.land()
         
-        # Wait for landing to complete
         async for armed in self.drone.telemetry.armed():
             if not armed:
                 print("-- Drone indi ve disarm edildi")
@@ -203,62 +226,62 @@ class DroneController(DroneConnection):
 
     async def run_mission(self) -> None:
         """Run complete mission: connect, takeoff, waypoints, land"""
-        await self.connect()
+        await super().connect() # DroneConnection'ın connect metodunu çağırıyoruz
         await self.get_flying_altitude()
         await self.arm_and_takeoff()
         await self.go_to_waypoints(waypoint_ids=("1","2","3"))
         await self.land()
 
 # --- ANA PROGRAM AKIŞI ---
-async def main(sys_address="serial:///dev/ttyACM0:115200"): # main fonksiyonu
-    # Kullanıcıdan seri port bilgisini al
+async def main(sys_address="serial:///dev/ttyACM0:115200"): 
     print('XBee bağlantısı için port girin')
-    if False:
-        if platform.system() == 'nt':
-            input_port = "COM"+str(input('COM? :'))
-        elif platform.system() == 'Linux':
-            input_port = "/dev/"+str(input('/dev/? :'))
-        else:
-            input_port = str(input(' :'))
+    if platform.system() == 'nt':
+        input_port = "COM"+str(input('COM? :'))
+    elif platform.system() == 'Linux':
+        input_port = "/dev/"+str(input('/dev/? :'))
     else:
-        input_port = "/dev/ttyUSB0"
-
-
-    # Drone oluştur
+        input_port = str(input(' :'))
+    
     my_drone = DroneController(sys_address=sys_address, port=input_port, drone_id="1")
 
+    # Waypoint'leri tanımla
     my_drone.waypoint.add("1",40.325757, 36.473615, 10.0, 0)
     my_drone.waypoint.add("2",40.325733, 36.473877, 10.0, 0)
     my_drone.waypoint.add("3",40.325499, 36.473636, 10.0, 0)
 
-    if not await my_drone.xbee_connect(): # connect metodu await ediliyor
+    # XBee bağlantısını kur
+    if not await my_drone.xbee_connect(): 
         print("XBee bağlantısı kurulamadı. Program sonlandırılıyor.")
-        return # Programı burada sonlandır
+        return 
 
     # Asenkron görevleri başlat
     telemetry_task = asyncio.create_task(my_drone.send_telemetry_loop())
     message_processing_task = asyncio.create_task(my_drone.process_messages_loop())
 
     try:
-        # Tüm görevlerin tamamlanmasını bekle (program kapanana kadar çalışacaklar)
-        # Genellikle programın kapanmasını beklemek için bu kullanılır,
-        # veya başka kullanıcı girişi/GUI döngüsü buraya konulabilir.
+        # Ana drone görevini başlat
         await my_drone.run_mission()
+        
+        # Görev tamamlandıktan sonra programı canlı tutmak için
+        print("Görev tamamlandı. Program aktif kalmaya devam ediyor...")
         while True:
-            await asyncio.sleep(1) # Ana döngüyü bloklamadan diğer görevlerin çalışmasına izin ver
-            # Bu döngü, programın canlı kalmasını sağlar.
+            await asyncio.sleep(1) 
 
     except asyncio.CancelledError:
         print("\nAsenkron görevler iptal edildi.")
     except KeyboardInterrupt:
         print("\nProgram sonlandırılıyor...")
+    except Exception as e:
+        print(f"Ana döngüde beklenmedik bir hata oluştu: {e}")
+        # import traceback
+        # traceback.print_exc() # Hata izini görmek için
     finally:
-        # Görevleri iptal et ve bağlantıyı kes
         telemetry_task.cancel()
         message_processing_task.cancel()
-        await asyncio.gather(telemetry_task, message_processing_task, return_exceptions=True) # Görevlerin bitmesini bekle
+        # Her iki görevin de iptal edilmesini bekleyin ve olası istisnaları yoksayın
+        await asyncio.gather(telemetry_task, message_processing_task, return_exceptions=True) 
         my_drone.xbee_disconnect()
         print("Program başarıyla sonlandırıldı.")
 
 if __name__ == '__main__':
-    asyncio.run(main()) # Ana asenkron fonksiyonu çalıştır
+    asyncio.run(main())

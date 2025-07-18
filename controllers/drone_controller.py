@@ -152,6 +152,7 @@ class DroneController(DroneConnection):
         print(f"-- Flying altitude set to: {self.flying_alt}m")
         return self.flying_alt
 
+
     async def arm_and_takeoff(self) -> None:
         """Arm drone and takeoff"""
         print("-- Arm ediliyor...")
@@ -160,19 +161,22 @@ class DroneController(DroneConnection):
         print("-- Taking off...")
         await self.drone.action.takeoff()
 
-        print("-- Waiting for drone to reach flying altitude...")
-        while True:
-            async for position in self.drone.telemetry.position():
-                # Yükselme sırasında göreceli irtifa kontrolü
-                if position.relative_altitude_m >= (self.target_alt * 0.9):  # Yüzde 90'ına ulaşınca yeterli
-                    print(f"-- Drone reached {position.relative_altitude_m:.2f}m relative altitude. Ready for waypoint mission")
-                    break # İç döngüden çık
-            else: # Eğer iç döngü break ile çıkmazsa, yani henüz irtifa gelmezse
-                await asyncio.sleep(1) # Bir saniye bekle ve tekrar dene
-                continue # Dış döngünün başına dön
-            break # İç döngüden break ile çıktıysak dış döngüden de çık
-
-        await asyncio.sleep(2) 
+        # Dronun kalkış irtifasına ulaşmasını bekle
+        print(f"-- Waiting for drone to reach flying altitude (target: {self.target_alt}m relative)...")
+        
+        # Sadece hedef irtifaya ulaşana kadar pozisyon akışını dinle
+        async for position in self.drone.telemetry.position():
+            # Göreceli irtifayı kontrol et
+            current_relative_altitude = position.relative_altitude_m
+            print(f"  Current relative altitude: {current_relative_altitude:.2f}m") # İrtifa takibi için
+            
+            # Hedef irtifanın %90'ına ulaştığında (biraz esneklik için) veya tamamen hedef irtifaya ulaştığında
+            # Koşulu `self.target_alt` ile kullanmak daha mantıklı olacaktır.
+            if current_relative_altitude >= (self.target_alt * 0.95): # Hedef irtifanın %95'i
+                print(f"-- Drone reached flying altitude ({current_relative_altitude:.2f}m relative), ready for waypoint mission")
+                break # Telemetri akışından ve bu asenkron fonksiyondan çık
+        
+        await asyncio.sleep(2)  # Stabilize olması için ekstra bekleme
 
     async def go_to_waypoints(self, waypoint_ids=None) -> None:
         if waypoint_ids is None:
