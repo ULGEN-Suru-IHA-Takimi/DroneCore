@@ -169,12 +169,12 @@ class DroneController(DroneConnection):
             await asyncio.sleep(2)
 
             # Wait until we reach the waypoint
-            print(f"-- Flying to waypoint {i}...")
+            print(f"-- Waypointe uçuluyor {i}...")
             target_reached = False
             while not target_reached:
                 async for position in self.drone.telemetry.position():
-                    lat_diff = abs(position.latitude_deg - lat)
-                    lon_diff = abs(position.longitude_deg - lon)
+                    lat_diff = abs(position.latitude_deg - waypoint.lat)
+                    lon_diff = abs(position.longitude_deg - waypoint.lon)
                     # If we're close enough (within ~10 meters)
                     if lat_diff < 0.0001 and lon_diff < 0.0001:
                         print(f"-- Reached waypoint {i}")
